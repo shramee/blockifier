@@ -4,14 +4,13 @@ use blockifier::transaction::errors::TransactionExecutionError;
 use num_bigint::BigUint;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use starknet_api::core::{ChainId, ClassHash, CompiledClassHash, ContractAddress};
+use starknet_api::core::{ChainId, ClassHash, CompiledClassHash, ContractAddress, EthAddress};
 use starknet_api::hash::StarkFelt;
-use starknet_api::transaction::EthAddress;
 
 use crate::errors::NativeBlockifierResult;
 
-#[derive(Eq, FromPyObject, Hash, PartialEq, Clone, Copy)]
-pub struct PyFelt(#[pyo3(from_py_with = "pyint_to_stark_felt")] pub StarkFelt);
+#[derive(Clone, Copy, Default, Eq, FromPyObject, Hash, PartialEq)]
+pub struct PyFelt(#[pyo3(from_py_with = "int_to_stark_felt")] pub StarkFelt);
 
 impl IntoPy<PyObject> for PyFelt {
     fn into_py(self, py: Python<'_>) -> PyObject {
@@ -59,7 +58,7 @@ impl From<CompiledClassHash> for PyFelt {
     }
 }
 
-fn pyint_to_stark_felt(int: &PyAny) -> PyResult<StarkFelt> {
+fn int_to_stark_felt(int: &PyAny) -> PyResult<StarkFelt> {
     let biguint: BigUint = int.extract()?;
     biguint_to_felt(biguint).map_err(|e| PyValueError::new_err(e.to_string()))
 }
@@ -77,8 +76,9 @@ where
     values.into_iter().map(converter).collect()
 }
 
-pub fn to_chain_id_enum(value: BigUint) -> NativeBlockifierResult<ChainId> {
-    Ok(ChainId(String::from_utf8_lossy(&value.to_bytes_be()).to_string()))
+pub fn int_to_chain_id(int: &PyAny) -> PyResult<ChainId> {
+    let biguint: BigUint = int.extract()?;
+    Ok(ChainId(String::from_utf8_lossy(&biguint.to_bytes_be()).into()))
 }
 
 // TODO(Dori, 1/4/2023): If and when supported in the Python build environment, use #[cfg(test)].

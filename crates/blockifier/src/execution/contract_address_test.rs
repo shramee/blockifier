@@ -1,10 +1,11 @@
 use starknet_api::core::{calculate_contract_address, ClassHash, ContractAddress};
-use starknet_api::hash::StarkFelt;
+use starknet_api::hash::{StarkFelt, StarkHash};
 use starknet_api::transaction::{Calldata, ContractAddressSalt};
-use starknet_api::{calldata, stark_felt};
+use starknet_api::{calldata, class_hash, stark_felt};
 
 use crate::abi::abi_utils::selector_from_name;
-use crate::execution::entry_point::{CallEntryPoint, CallExecution, Retdata};
+use crate::execution::call_info::{CallExecution, Retdata};
+use crate::execution::entry_point::CallEntryPoint;
 use crate::retdata;
 use crate::state::cached_state::CachedState;
 use crate::test_utils::{
@@ -40,7 +41,7 @@ fn test_calculate_contract_address() {
     }
 
     let salt = ContractAddressSalt::default();
-    let class_hash = ClassHash(stark_felt!(TEST_CLASS_HASH));
+    let class_hash = class_hash!(TEST_CLASS_HASH);
     let deployer_address = ContractAddress::try_from(stark_felt!(TEST_CONTRACT_ADDRESS)).unwrap();
 
     // Without constructor.

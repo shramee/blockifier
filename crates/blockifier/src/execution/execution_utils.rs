@@ -18,10 +18,11 @@ use starknet_api::deprecated_contract_class::Program as DeprecatedProgram;
 use starknet_api::hash::StarkFelt;
 use starknet_api::transaction::Calldata;
 
+use crate::execution::call_info::{CallInfo, Retdata};
 use crate::execution::contract_class::ContractClass;
 use crate::execution::entry_point::{
-    execute_constructor_entry_point, CallEntryPoint, CallInfo, ConstructorContext,
-    EntryPointExecutionContext, EntryPointExecutionResult, ExecutionResources, Retdata,
+    execute_constructor_entry_point, CallEntryPoint, ConstructorContext,
+    EntryPointExecutionContext, EntryPointExecutionResult, ExecutionResources,
 };
 use crate::execution::errors::PostExecutionError;
 use crate::execution::{cairo1_execution, deprecated_execution};
@@ -99,17 +100,6 @@ pub fn felt_from_ptr(
     let felt = vm.get_integer(*ptr)?.into_owned();
     *ptr = (*ptr + 1)?;
     Ok(felt)
-}
-
-pub fn u256_from_ptr(
-    vm: &VirtualMachine,
-    ptr: &mut Relocatable,
-) -> Result<BigUint, VirtualMachineError> {
-    let low = vm.get_integer(*ptr)?;
-    *ptr = (*ptr + 1)?;
-    let high = vm.get_integer(*ptr)?;
-    *ptr = (*ptr + 1)?;
-    Ok((high.to_biguint() << 128) + low.to_biguint())
 }
 
 pub fn write_u256(

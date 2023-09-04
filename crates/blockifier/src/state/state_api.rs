@@ -10,6 +10,12 @@ use crate::state::errors::StateError;
 
 pub type StateResult<T> = Result<T, StateError>;
 
+// TODO(barak, 01/10/2023): Remove this enum from here once it can be used from starknet_api.
+pub enum DataAvailabilityMode {
+    L1 = 0,
+    L2 = 1,
+}
+
 /// A read-only API for accessing StarkNet global state.
 ///
 /// The `self` argument is mutable for flexibility during reads (for example, caching reads),
@@ -42,14 +48,16 @@ pub trait StateReader {
     /// Returns the storage value representing the balance (in fee token) at the given address.
     // TODO(Dori, 1/7/2023): When a standard representation for large integers is set, change the
     //    return type to that.
+    // TODO(Dori, 1/9/2023): NEW_TOKEN_SUPPORT Determine fee token address based on tx version,
+    //   once v3 is introduced.
     fn get_fee_token_balance(
         &mut self,
         block_context: &BlockContext,
         contract_address: &ContractAddress,
     ) -> Result<(StarkFelt, StarkFelt), StateError> {
         let (low_key, high_key) = get_erc20_balance_var_addresses(contract_address)?;
-        let low = self.get_storage_at(block_context.fee_token_address, low_key)?;
-        let high = self.get_storage_at(block_context.fee_token_address, high_key)?;
+        let low = self.get_storage_at(block_context.deprecated_fee_token_address, low_key)?;
+        let high = self.get_storage_at(block_context.deprecated_fee_token_address, high_key)?;
 
         Ok((low, high))
     }

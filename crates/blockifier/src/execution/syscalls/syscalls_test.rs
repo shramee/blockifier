@@ -5,22 +5,24 @@ use cairo_vm::vm::runners::builtin_runner::RANGE_CHECK_BUILTIN_NAME;
 use cairo_vm::vm::runners::cairo_runner::ExecutionResources as VmExecutionResources;
 use itertools::concat;
 use pretty_assertions::assert_eq;
-use starknet_api::core::{calculate_contract_address, ClassHash, ContractAddress, PatriciaKey};
+use starknet_api::core::{
+    calculate_contract_address, ClassHash, ContractAddress, EthAddress, PatriciaKey,
+};
 use starknet_api::hash::{StarkFelt, StarkHash};
 use starknet_api::state::StorageKey;
 use starknet_api::transaction::{
-    Calldata, ContractAddressSalt, EthAddress, EventContent, EventData, EventKey, L2ToL1Payload,
+    Calldata, ContractAddressSalt, EventContent, EventData, EventKey, L2ToL1Payload,
 };
-use starknet_api::{calldata, patricia_key, stark_felt};
+use starknet_api::{calldata, class_hash, contract_address, patricia_key, stark_felt};
 use test_case::test_case;
 
 use crate::abi::abi_utils::selector_from_name;
 use crate::abi::constants;
-use crate::execution::contract_class::ContractClassV0;
-use crate::execution::entry_point::{
-    CallEntryPoint, CallExecution, CallInfo, CallType, MessageToL1, OrderedEvent,
-    OrderedL2ToL1Message, Retdata,
+use crate::execution::call_info::{
+    CallExecution, CallInfo, MessageToL1, OrderedEvent, OrderedL2ToL1Message, Retdata,
 };
+use crate::execution::contract_class::ContractClassV0;
+use crate::execution::entry_point::{CallEntryPoint, CallType};
 use crate::execution::errors::EntryPointExecutionError;
 use crate::execution::syscalls::hint_processor::{
     BLOCK_NUMBER_OUT_OF_RANGE_ERROR, OUT_OF_GAS_ERROR,
@@ -33,8 +35,8 @@ use crate::test_utils::{
     TEST_EMPTY_CONTRACT_CLASS_HASH,
 };
 
-pub const REQUIRED_GAS_STORAGE_READ_WRITE_TEST: u64 = 35050;
-pub const REQUIRED_GAS_CALL_CONTRACT_TEST: u64 = 128880;
+pub const REQUIRED_GAS_STORAGE_READ_WRITE_TEST: u64 = 34650;
+pub const REQUIRED_GAS_CALL_CONTRACT_TEST: u64 = 128080;
 pub const REQUIRED_GAS_LIBRARY_CALL_TEST: u64 = REQUIRED_GAS_CALL_CONTRACT_TEST;
 
 #[test]
@@ -119,7 +121,7 @@ fn test_emit_event() {
         entry_point_call.execute_directly(&mut state).unwrap().execution,
         CallExecution {
             events: vec![OrderedEvent { order: 0, event }],
-            gas_consumed: 52970,
+            gas_consumed: 52570,
             ..Default::default()
         }
     );
@@ -148,7 +150,7 @@ fn test_get_block_hash() {
 
     assert_eq!(
         entry_point_call.execute_directly(&mut state).unwrap().execution,
-        CallExecution { gas_consumed: 15650, ..CallExecution::from_retdata(retdata![block_hash]) }
+        CallExecution { gas_consumed: 15250, ..CallExecution::from_retdata(retdata![block_hash]) }
     );
 
     // Negative flow.
@@ -178,7 +180,7 @@ fn test_keccak() {
 
     assert_eq!(
         entry_point_call.execute_directly(&mut state).unwrap().execution,
-        CallExecution { gas_consumed: 339240_u64, ..CallExecution::from_retdata(retdata![]) }
+        CallExecution { gas_consumed: 354940, ..CallExecution::from_retdata(retdata![]) }
     );
 }
 
@@ -227,7 +229,7 @@ fn test_library_call() {
     let entry_point_call = CallEntryPoint {
         entry_point_selector: selector_from_name("test_library_call"),
         calldata,
-        class_hash: Some(ClassHash(stark_felt!(TEST_CLASS_HASH))),
+        class_hash: Some(class_hash!(TEST_CLASS_HASH)),
         ..trivial_external_entry_point()
     };
 
@@ -260,17 +262,17 @@ fn test_nested_library_call() {
     let main_entry_point = CallEntryPoint {
         entry_point_selector: selector_from_name("test_nested_library_call"),
         calldata: main_entry_point_calldata,
-        class_hash: Some(ClassHash(stark_felt!(TEST_CLASS_HASH))),
+        class_hash: Some(class_hash!(TEST_CLASS_HASH)),
         initial_gas: 9999906600,
         ..trivial_external_entry_point()
     };
     let nested_storage_entry_point = CallEntryPoint {
         entry_point_selector: inner_entry_point_selector,
         calldata: calldata![stark_felt!(key + 1), stark_felt!(value + 1)],
-        class_hash: Some(ClassHash(stark_felt!(TEST_CLASS_HASH))),
+        class_hash: Some(class_hash!(TEST_CLASS_HASH)),
         code_address: None,
         call_type: CallType::Delegate,
-        initial_gas: 9999719920,
+        initial_gas: 9999720720,
         ..trivial_external_entry_point()
     };
     let library_entry_point = CallEntryPoint {
@@ -282,20 +284,20 @@ fn test_nested_library_call() {
             stark_felt!(key + 1),         // Calldata: address.
             stark_felt!(value + 1)        // Calldata: value.
         ],
-        class_hash: Some(ClassHash(stark_felt!(TEST_CLASS_HASH))),
+        class_hash: Some(class_hash!(TEST_CLASS_HASH)),
         code_address: None,
         call_type: CallType::Delegate,
-        initial_gas: 9999813750,
+        initial_gas: 9999814150,
         ..trivial_external_entry_point()
     };
     let storage_entry_point = CallEntryPoint {
         calldata: calldata![stark_felt!(key), stark_felt!(value)],
-        initial_gas: 9999623870,
+        initial_gas: 9999625070,
         ..nested_storage_entry_point
     };
     let storage_entry_point_vm_resources = VmExecutionResources {
-        n_steps: 147,
-        n_memory_holes: 2,
+        n_steps: 143,
+        n_memory_holes: 1,
         builtin_instance_counter: HashMap::from([(RANGE_CHECK_BUILTIN_NAME.to_string(), 5)]),
     };
     let nested_storage_call_info = CallInfo {
@@ -311,8 +313,8 @@ fn test_nested_library_call() {
         ..Default::default()
     };
     let library_call_vm_resources = VmExecutionResources {
-        n_steps: 419,
-        n_memory_holes: 4,
+        n_steps: 411,
+        n_memory_holes: 2,
         builtin_instance_counter: HashMap::from([(RANGE_CHECK_BUILTIN_NAME.to_string(), 13)]),
     };
     let library_call_info = CallInfo {
@@ -340,15 +342,15 @@ fn test_nested_library_call() {
     };
 
     let main_call_vm_resources = VmExecutionResources {
-        n_steps: 781,
-        n_memory_holes: 8,
+        n_steps: 765,
+        n_memory_holes: 4,
         builtin_instance_counter: HashMap::from([(RANGE_CHECK_BUILTIN_NAME.to_string(), 23)]),
     };
     let expected_call_info = CallInfo {
         call: main_entry_point.clone(),
         execution: CallExecution {
             retdata: retdata![stark_felt!(value)],
-            gas_consumed: 317780,
+            gas_consumed: 316180,
             ..CallExecution::default()
         },
         vm_resources: main_call_vm_resources,
@@ -375,7 +377,7 @@ fn test_replace_class() {
     assert!(error.contains("is not declared"));
 
     // Replace with Cairo 0 class hash.
-    let v0_class_hash = ClassHash(stark_felt!(5678_u16));
+    let v0_class_hash = class_hash!(5678_u16);
     let v0_contract_class = ContractClassV0::from_file(TEST_EMPTY_CONTRACT_CAIRO0_PATH).into();
     state.set_contract_class(&v0_class_hash, v0_contract_class).unwrap();
 
@@ -388,9 +390,9 @@ fn test_replace_class() {
     assert!(error.contains("Cannot replace V1 class hash with V0 class hash"));
 
     // Positive flow.
-    let contract_address = ContractAddress(patricia_key!(TEST_CONTRACT_ADDRESS));
-    let old_class_hash = ClassHash(stark_felt!(TEST_CLASS_HASH));
-    let new_class_hash = ClassHash(stark_felt!(TEST_EMPTY_CONTRACT_CLASS_HASH));
+    let contract_address = contract_address!(TEST_CONTRACT_ADDRESS);
+    let old_class_hash = class_hash!(TEST_CLASS_HASH);
+    let new_class_hash = class_hash!(TEST_EMPTY_CONTRACT_CLASS_HASH);
     assert_eq!(state.get_class_hash_at(contract_address).unwrap(), old_class_hash);
     let entry_point_call = CallEntryPoint {
         calldata: calldata![new_class_hash.0],
@@ -399,7 +401,7 @@ fn test_replace_class() {
     };
     assert_eq!(
         entry_point_call.execute_directly(&mut state).unwrap().execution,
-        CallExecution { gas_consumed: 14850, ..Default::default() }
+        CallExecution { gas_consumed: 14450, ..Default::default() }
     );
     assert_eq!(state.get_class_hash_at(contract_address).unwrap(), new_class_hash);
 }
@@ -417,7 +419,24 @@ fn test_secp256k1() {
 
     assert_eq!(
         entry_point_call.execute_directly(&mut state).unwrap().execution,
-        CallExecution { gas_consumed: 17156340_u64, ..Default::default() }
+        CallExecution { gas_consumed: 38329910_u64, ..Default::default() }
+    );
+}
+
+#[test]
+fn test_secp256r1() {
+    let mut state = create_test_state();
+
+    let calldata = Calldata(vec![].into());
+    let entry_point_call = CallEntryPoint {
+        entry_point_selector: selector_from_name("test_secp256r1"),
+        calldata,
+        ..trivial_external_entry_point()
+    };
+
+    assert_eq!(
+        entry_point_call.execute_directly(&mut state).unwrap().execution,
+        CallExecution { gas_consumed: 55494070_u64, ..Default::default() }
     );
 }
 
@@ -443,14 +462,14 @@ fn test_send_message_to_l1() {
         entry_point_call.execute_directly(&mut state).unwrap().execution,
         CallExecution {
             l2_to_l1_messages: vec![OrderedL2ToL1Message { order: 0, message }],
-            gas_consumed: 38390,
+            gas_consumed: 37990,
             ..Default::default()
         }
     );
 }
 
 #[test_case(
-    ClassHash(stark_felt!(TEST_EMPTY_CONTRACT_CLASS_HASH)),
+    class_hash!(TEST_EMPTY_CONTRACT_CLASS_HASH),
     calldata![
     stark_felt!(TEST_EMPTY_CONTRACT_CLASS_HASH), // Class hash.
     ContractAddressSalt::default().0,            // Contract_address_salt.
@@ -461,7 +480,7 @@ fn test_send_message_to_l1() {
     None ;
     "No constructor: Positive flow")]
 #[test_case(
-    ClassHash(stark_felt!(TEST_EMPTY_CONTRACT_CLASS_HASH)),
+    class_hash!(TEST_EMPTY_CONTRACT_CLASS_HASH),
     calldata![
         stark_felt!(TEST_EMPTY_CONTRACT_CLASS_HASH), // Class hash.
         ContractAddressSalt::default().0,            // Contract_address_salt.
@@ -478,7 +497,7 @@ fn test_send_message_to_l1() {
     "Invalid input: constructor_calldata; Cannot pass calldata to a contract with no constructor.");
     "No constructor: Negative flow: nonempty calldata")]
 #[test_case(
-    ClassHash(stark_felt!(TEST_CLASS_HASH)),
+    class_hash!(TEST_CLASS_HASH),
     calldata![
         stark_felt!(TEST_CLASS_HASH),     // Class hash.
         ContractAddressSalt::default().0, // Contract_address_salt.
@@ -494,7 +513,7 @@ fn test_send_message_to_l1() {
     None;
     "With constructor: Positive flow")]
 #[test_case(
-    ClassHash(stark_felt!(TEST_CLASS_HASH)),
+    class_hash!(TEST_CLASS_HASH),
     calldata![
         stark_felt!(TEST_CLASS_HASH),     // Class hash.
         ContractAddressSalt::default().0, // Contract_address_salt.
@@ -533,7 +552,7 @@ fn test_deploy(
         ContractAddressSalt::default(),
         class_hash,
         &constructor_calldata,
-        ContractAddress(patricia_key!(TEST_CONTRACT_ADDRESS)),
+        contract_address!(TEST_CONTRACT_ADDRESS),
     )
     .unwrap();
     let deploy_call = &entry_point_call.execute_directly(&mut state).unwrap().inner_calls[0];
@@ -543,7 +562,7 @@ fn test_deploy(
         0
     } else {
         retdata.0.push(constructor_calldata.0[0]);
-        17040
+        16640
     };
     assert_eq!(
         deploy_call.execution,

@@ -5,7 +5,7 @@ use cairo_felt::Felt252;
 use cairo_lang_casm::hints::{Hint, StarknetHint};
 use cairo_lang_casm::operand::{BinOpOperand, DerefOrImmediate, Operation, Register, ResOperand};
 use cairo_lang_runner::casm_run::execute_core_hint_base;
-use cairo_vm::hint_processor::hint_processor_definition::{HintProcessor, HintReference};
+use cairo_vm::hint_processor::hint_processor_definition::{HintProcessorLogic, HintReference};
 use cairo_vm::serde::deserialize_program::ApTracking;
 use cairo_vm::types::errors::math_errors::MathError;
 use cairo_vm::types::exec_scope::ExecutionScopes;
@@ -13,9 +13,8 @@ use cairo_vm::types::relocatable::{MaybeRelocatable, Relocatable};
 use cairo_vm::vm::errors::hint_errors::HintError;
 use cairo_vm::vm::errors::memory_errors::MemoryError;
 use cairo_vm::vm::errors::vm_errors::VirtualMachineError;
-use cairo_vm::vm::runners::cairo_runner::RunResources;
+use cairo_vm::vm::runners::cairo_runner::{ResourceTracker, RunResources};
 use cairo_vm::vm::vm_core::VirtualMachine;
-use num_traits::ToPrimitive;
 use starknet_api::core::{ClassHash, ContractAddress, EntryPointSelector};
 use starknet_api::deprecated_contract_class::EntryPointType;
 use starknet_api::hash::StarkFelt;
@@ -25,18 +24,21 @@ use starknet_api::StarknetApiError;
 use thiserror::Error;
 
 use crate::abi::constants;
+use crate::abi::sierra_types::SierraTypeError;
+use crate::execution::call_info::{CallInfo, OrderedEvent, OrderedL2ToL1Message};
 use crate::execution::common_hints::HintExecutionResult;
 use crate::execution::entry_point::{
-    CallEntryPoint, CallInfo, CallType, EntryPointExecutionContext, ExecutionResources,
-    OrderedEvent, OrderedL2ToL1Message,
+    CallEntryPoint, CallType, EntryPointExecutionContext, ExecutionResources,
 };
 use crate::execution::errors::EntryPointExecutionError;
 use crate::execution::execution_utils::{
-    felt_range_from_ptr, felt_to_stark_felt, stark_felt_from_ptr, stark_felt_to_felt,
-    write_maybe_relocatable, ReadOnlySegment, ReadOnlySegments,
+    felt_range_from_ptr, stark_felt_from_ptr, stark_felt_to_felt, write_maybe_relocatable,
+    ReadOnlySegment, ReadOnlySegments,
 };
 use crate::execution::syscalls::secp::{
     secp256k1_add, secp256k1_get_point_from_x, secp256k1_get_xy, secp256k1_mul, secp256k1_new,
+    secp256r1_add, secp256r1_get_point_from_x, secp256r1_get_xy, secp256r1_mul, secp256r1_new,
+    SecpHintProcessor,
 };
 use crate::execution::syscalls::{
     call_contract, deploy, emit_event, get_block_hash, get_execution_info, keccak, library_call,
@@ -68,6 +70,8 @@ pub enum SyscallExecutionError {
     MathError(#[from] cairo_vm::types::errors::math_errors::MathError),
     #[error(transparent)]
     MemoryError(#[from] MemoryError),
+    #[error(transparent)]
+    SierraTypeError(#[from] SierraTypeError),
     #[error(transparent)]
     StarknetApiError(#[from] StarknetApiError),
     #[error(transparent)]
@@ -124,8 +128,9 @@ pub struct SyscallHintProcessor<'a> {
     pub read_values: Vec<StarkFelt>,
     pub accessed_keys: HashSet<StorageKey>,
 
-    // Secp256k1 points.
-    pub secp256k1_points: Vec<ark_secp256k1::Affine>,
+    // Secp hint processors.
+    pub secp256k1_hint_processor: super::secp::SecpHintProcessor<ark_secp256k1::Config>,
+    pub secp256r1_hint_processor: super::secp::SecpHintProcessor<ark_secp256r1::Config>,
 
     // Additional fields.
     hints: &'a HashMap<String, Hint>,
@@ -157,7 +162,8 @@ impl<'a> SyscallHintProcessor<'a> {
             accessed_keys: HashSet::new(),
             hints,
             execution_info_ptr: None,
-            secp256k1_points: vec![],
+            secp256k1_hint_processor: SecpHintProcessor::default(),
+            secp256r1_hint_processor: SecpHintProcessor::default(),
         }
     }
 
@@ -191,9 +197,9 @@ impl<'a> SyscallHintProcessor<'a> {
         vm: &mut VirtualMachine,
         hint: &StarknetHint,
     ) -> HintExecutionResult {
-        let StarknetHint::SystemCall{ system: syscall } = hint else {
+        let StarknetHint::SystemCall { system: syscall } = hint else {
             return Err(HintError::CustomHint(
-                "Test functions are unsupported on starknet.".into()
+                "Test functions are unsupported on starknet.".into(),
             ));
         };
         let initial_syscall_ptr = get_ptr_from_res_operand_unchecked(vm, syscall);
@@ -247,6 +253,23 @@ impl<'a> SyscallHintProcessor<'a> {
             }
             SyscallSelector::Secp256k1New => {
                 self.execute_syscall(vm, secp256k1_new, constants::SECP256K1_NEW_GAS_COST)
+            }
+            SyscallSelector::Secp256r1Add => {
+                self.execute_syscall(vm, secp256r1_add, constants::SECP256R1_ADD_GAS_COST)
+            }
+            SyscallSelector::Secp256r1GetPointFromX => self.execute_syscall(
+                vm,
+                secp256r1_get_point_from_x,
+                constants::SECP256R1_GET_POINT_FROM_X_GAS_COST,
+            ),
+            SyscallSelector::Secp256r1GetXy => {
+                self.execute_syscall(vm, secp256r1_get_xy, constants::SECP256R1_GET_XY_GAS_COST)
+            }
+            SyscallSelector::Secp256r1Mul => {
+                self.execute_syscall(vm, secp256r1_mul, constants::SECP256R1_MUL_GAS_COST)
+            }
+            SyscallSelector::Secp256r1New => {
+                self.execute_syscall(vm, secp256r1_new, constants::SECP256R1_NEW_GAS_COST)
             }
             SyscallSelector::SendMessageToL1 => {
                 self.execute_syscall(vm, send_message_to_l1, constants::SEND_MESSAGE_TO_L1_GAS_COST)
@@ -428,25 +451,6 @@ impl<'a> SyscallHintProcessor<'a> {
 
         Ok(StorageWriteResponse {})
     }
-
-    pub fn allocate_secp256k1_point(&mut self, ec_point: ark_secp256k1::Affine) -> usize {
-        let points = &mut self.secp256k1_points;
-        let id = points.len();
-        points.push(ec_point);
-        id
-    }
-
-    pub fn get_secp256k1_point_by_id(
-        &self,
-        ec_point_id: Felt252,
-    ) -> SyscallResult<&ark_secp256k1::Affine> {
-        ec_point_id.to_usize().and_then(|id| self.secp256k1_points.get(id)).ok_or_else(|| {
-            SyscallExecutionError::InvalidSyscallInput {
-                input: felt_to_stark_felt(&ec_point_id),
-                info: "Invalid Secp256k1 point ID".to_string(),
-            }
-        })
-    }
 }
 
 /// Retrieves a [Relocatable] from the VM given a [ResOperand].
@@ -469,23 +473,37 @@ fn get_ptr_from_res_operand_unchecked(vm: &mut VirtualMachine, res: &ResOperand)
     (vm.get_relocatable(cell_reloc).unwrap() + &base_offset).unwrap()
 }
 
-impl HintProcessor for SyscallHintProcessor<'_> {
+impl ResourceTracker for SyscallHintProcessor<'_> {
+    fn consumed(&self) -> bool {
+        self.context.vm_run_resources.consumed()
+    }
+
+    fn consume_step(&mut self) {
+        self.context.vm_run_resources.consume_step()
+    }
+
+    fn get_n_steps(&self) -> Option<usize> {
+        self.context.vm_run_resources.get_n_steps()
+    }
+
+    fn run_resources(&self) -> &RunResources {
+        self.context.vm_run_resources.run_resources()
+    }
+}
+
+impl HintProcessorLogic for SyscallHintProcessor<'_> {
     fn execute_hint(
         &mut self,
         vm: &mut VirtualMachine,
         exec_scopes: &mut ExecutionScopes,
         hint_data: &Box<dyn Any>,
         _constants: &HashMap<String, Felt252>,
-        run_resources: &mut RunResources,
     ) -> HintExecutionResult {
-        self.context.vm_run_resources = run_resources.clone();
         let hint = hint_data.downcast_ref::<Hint>().ok_or(HintError::WrongHintData)?;
-        let result = match hint {
+        match hint {
             Hint::Core(hint) => execute_core_hint_base(vm, exec_scopes, hint),
             Hint::Starknet(hint) => self.execute_next_syscall(vm, hint),
-        };
-        *run_resources = self.context.vm_run_resources.clone();
-        result
+        }
     }
 
     /// Trait function to store hint in the hint processor by string.

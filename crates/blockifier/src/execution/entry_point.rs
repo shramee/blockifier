@@ -1,25 +1,22 @@
-use std::collections::HashSet;
+use std::cmp::min;
 
 use cairo_vm::vm::runners::cairo_runner::{
-    ExecutionResources as VmExecutionResources, RunResources,
+    ExecutionResources as VmExecutionResources, ResourceTracker, RunResources,
 };
 use starknet_api::core::{ClassHash, ContractAddress, EntryPointSelector};
 use starknet_api::deprecated_contract_class::EntryPointType;
 use starknet_api::hash::StarkFelt;
-use starknet_api::state::StorageKey;
-use starknet_api::transaction::{
-    Calldata, EthAddress, EventContent, Fee, L2ToL1Payload, TransactionVersion,
-};
+use starknet_api::transaction::{Calldata, Fee, TransactionVersion};
 
 use crate::abi::abi_utils::selector_from_name;
 use crate::abi::constants;
 use crate::block_context::BlockContext;
+use crate::execution::call_info::CallInfo;
 use crate::execution::deprecated_syscalls::hint_processor::SyscallCounter;
 use crate::execution::errors::{EntryPointExecutionError, PreExecutionError};
 use crate::execution::execution_utils::execute_entry_point_call;
 use crate::state::state_api::State;
-use crate::transaction::errors::TransactionExecutionError;
-use crate::transaction::objects::{AccountTransactionContext, TransactionExecutionResult};
+use crate::transaction::objects::AccountTransactionContext;
 
 #[cfg(test)]
 #[path = "entry_point_test.rs"]
@@ -91,10 +88,10 @@ impl EntryPointExecutionContext {
     pub fn new(
         block_context: BlockContext,
         account_tx_context: AccountTransactionContext,
-        max_n_steps: u32,
+        max_n_steps: usize,
     ) -> Self {
         Self {
-            vm_run_resources: RunResources::new(max_n_steps as usize),
+            vm_run_resources: RunResources::new(max_n_steps),
             n_emitted_events: 0,
             n_sent_messages_to_l1: 0,
             error_stack: vec![],
@@ -105,22 +102,58 @@ impl EntryPointExecutionContext {
         }
     }
 
+    pub fn new_validate(
+        block_context: &BlockContext,
+        account_tx_context: &AccountTransactionContext,
+    ) -> Self {
+        Self::new(
+            block_context.clone(),
+            account_tx_context.clone(),
+            block_context.validate_max_n_steps as usize,
+        )
+    }
+
+    pub fn new_invoke(
+        block_context: &BlockContext,
+        account_tx_context: &AccountTransactionContext,
+    ) -> Self {
+        Self::new(
+            block_context.clone(),
+            account_tx_context.clone(),
+            Self::max_invoke_steps(block_context, account_tx_context),
+        )
+    }
+
     /// Returns the maximum number of cairo steps allowed, given the max fee and gas price.
     /// If fee is disabled, returns the global maximum.
-    pub fn max_steps(&self) -> usize {
-        if self.account_tx_context.max_fee == Fee(0) {
-            constants::MAX_STEPS_PER_TX
+    pub fn max_invoke_steps(
+        block_context: &BlockContext,
+        account_tx_context: &AccountTransactionContext,
+    ) -> usize {
+        if account_tx_context.max_fee == Fee(0) {
+            min(constants::MAX_STEPS_PER_TX, block_context.invoke_tx_max_n_steps as usize)
         } else {
-            let gas_per_step = self
-                .block_context
+            let gas_per_step = block_context
                 .vm_resource_fee_cost
                 .get(constants::N_STEPS_RESOURCE)
                 .unwrap_or_else(|| {
                     panic!("{} must appear in `vm_resource_fee_cost`.", constants::N_STEPS_RESOURCE)
                 });
-            let max_gas = self.account_tx_context.max_fee.0 / self.block_context.gas_price;
-            ((max_gas as f64 / gas_per_step).floor() as usize).min(constants::MAX_STEPS_PER_TX)
+            let max_gas = account_tx_context.max_fee.0 / block_context.gas_price;
+            ((max_gas as f64 / gas_per_step).floor() as usize)
+                .min(constants::MAX_STEPS_PER_TX)
+                .min(block_context.invoke_tx_max_n_steps as usize)
         }
+    }
+
+    /// Subtracts the given number of steps from the currently available run resources.
+    /// Used for limiting the number of steps available during the execution stage, to leave enough
+    /// steps available for the fee transfer stage.
+    pub fn subtract_steps(&mut self, steps_to_subtract: usize) {
+        let current_n_steps =
+            self.vm_run_resources.get_n_steps().expect("The number of steps must be initialized.");
+        let steps_to_subtract = min(steps_to_subtract, current_n_steps);
+        self.vm_run_resources = RunResources::new(current_n_steps - steps_to_subtract);
     }
 
     /// Combines individual errors into a single stack trace string, with contract addresses printed
@@ -202,132 +235,6 @@ impl CallEntryPoint {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct Retdata(pub Vec<StarkFelt>);
-
-#[macro_export]
-macro_rules! retdata {
-    ( $( $x:expr ),* ) => {
-        Retdata(vec![$($x),*])
-    };
-}
-
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct OrderedEvent {
-    pub order: usize,
-    pub event: EventContent,
-}
-
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct MessageToL1 {
-    pub to_address: EthAddress,
-    pub payload: L2ToL1Payload,
-}
-
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct OrderedL2ToL1Message {
-    pub order: usize,
-    pub message: MessageToL1,
-}
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct CallExecution {
-    pub retdata: Retdata,
-    pub events: Vec<OrderedEvent>,
-    pub l2_to_l1_messages: Vec<OrderedL2ToL1Message>,
-    pub failed: bool,
-    pub gas_consumed: u64,
-}
-
-#[derive(Debug, Default, Eq, PartialEq)]
-pub struct CallInfo {
-    pub call: CallEntryPoint,
-    pub execution: CallExecution,
-    pub vm_resources: VmExecutionResources,
-    pub inner_calls: Vec<CallInfo>,
-
-    // Additional information gathered during execution.
-    pub storage_read_values: Vec<StarkFelt>,
-    pub accessed_storage_keys: HashSet<StorageKey>,
-}
-
-impl CallInfo {
-    /// Returns the set of class hashes that were executed during this call execution.
-    // TODO: Add unit test for this method
-    pub fn get_executed_class_hashes(&self) -> HashSet<ClassHash> {
-        let mut class_hashes = HashSet::new();
-        let calls = self.into_iter();
-        for call in calls {
-            class_hashes
-                .insert(call.call.class_hash.expect("Class hash must be set after execution."));
-        }
-
-        class_hashes
-    }
-
-    /// Returns a list of StarkNet L2ToL1Payload length collected during the execution, sorted
-    /// by the order in which they were sent.
-    pub fn get_sorted_l2_to_l1_payloads_length(&self) -> TransactionExecutionResult<Vec<usize>> {
-        let n_messages = self.into_iter().map(|call| call.execution.l2_to_l1_messages.len()).sum();
-        let mut starknet_l2_to_l1_payloads_length: Vec<Option<usize>> = vec![None; n_messages];
-
-        for call in self.into_iter() {
-            for ordered_message_content in &call.execution.l2_to_l1_messages {
-                let message_order = ordered_message_content.order;
-                if message_order >= n_messages {
-                    return Err(TransactionExecutionError::InvalidOrder {
-                        object: "L2-to-L1 message".to_string(),
-                        order: message_order,
-                        max_order: n_messages,
-                    });
-                }
-                starknet_l2_to_l1_payloads_length[message_order] =
-                    Some(ordered_message_content.message.payload.0.len());
-            }
-        }
-
-        starknet_l2_to_l1_payloads_length.into_iter().enumerate().try_fold(
-            Vec::new(),
-            |mut acc, (i, option)| match option {
-                Some(value) => {
-                    acc.push(value);
-                    Ok(acc)
-                }
-                None => Err(TransactionExecutionError::UnexpectedHoles {
-                    object: "L2-to-L1 message".to_string(),
-                    order: i,
-                }),
-            },
-        )
-    }
-}
-
-pub struct CallInfoIter<'a> {
-    call_infos: Vec<&'a CallInfo>,
-}
-
-impl<'a> Iterator for CallInfoIter<'a> {
-    type Item = &'a CallInfo;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let Some(call_info) = self.call_infos.pop() else {
-            return None;
-        };
-
-        // Push order is right to left.
-        self.call_infos.extend(call_info.inner_calls.iter().rev());
-        Some(call_info)
-    }
-}
-
-impl<'a> IntoIterator for &'a CallInfo {
-    type Item = &'a CallInfo;
-    type IntoIter = CallInfoIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        CallInfoIter { call_infos: vec![self] }
-    }
-}
-
 pub fn execute_constructor_entry_point(
     state: &mut dyn State,
     resources: &mut ExecutionResources,
@@ -340,7 +247,7 @@ pub fn execute_constructor_entry_point(
     let contract_class = state.get_compiled_contract_class(&ctor_context.class_hash)?;
     let Some(constructor_selector) = contract_class.constructor_selector() else {
         // Contract has no constructor.
-        return handle_empty_constructor(ctor_context, calldata,remaining_gas);
+        return handle_empty_constructor(ctor_context, calldata, remaining_gas);
     };
 
     let constructor_call = CallEntryPoint {

@@ -4,13 +4,13 @@ use cairo_vm::vm::vm_core::VirtualMachine;
 use serde::Deserialize;
 use starknet_api::block::{BlockNumber, BlockTimestamp};
 use starknet_api::core::{
-    calculate_contract_address, ClassHash, ContractAddress, EntryPointSelector,
+    calculate_contract_address, ClassHash, ContractAddress, EntryPointSelector, EthAddress,
 };
 use starknet_api::deprecated_contract_class::EntryPointType;
 use starknet_api::hash::StarkFelt;
 use starknet_api::state::StorageKey;
 use starknet_api::transaction::{
-    Calldata, ContractAddressSalt, EthAddress, EventContent, EventData, EventKey, L2ToL1Payload,
+    Calldata, ContractAddressSalt, EventContent, EventData, EventKey, L2ToL1Payload,
 };
 use strum_macros::EnumIter;
 
@@ -19,9 +19,8 @@ use self::hint_processor::{
     read_felt_array, DeprecatedSyscallExecutionError, DeprecatedSyscallHintProcessor,
 };
 use crate::abi::constants;
-use crate::execution::entry_point::{
-    CallEntryPoint, CallType, ConstructorContext, MessageToL1, OrderedEvent, OrderedL2ToL1Message,
-};
+use crate::execution::call_info::{MessageToL1, OrderedEvent, OrderedL2ToL1Message};
+use crate::execution::entry_point::{CallEntryPoint, CallType, ConstructorContext};
 use crate::execution::execution_utils::{
     execute_deployment, stark_felt_from_ptr, write_maybe_relocatable, write_stark_felt,
     ReadOnlySegment,
@@ -60,6 +59,11 @@ pub enum DeprecatedSyscallSelector {
     Secp256k1GetXy,
     Secp256k1Mul,
     Secp256k1New,
+    Secp256r1Add,
+    Secp256r1GetPointFromX,
+    Secp256r1GetXy,
+    Secp256r1Mul,
+    Secp256r1New,
     SendMessageToL1,
     StorageRead,
     StorageWrite,
@@ -96,6 +100,11 @@ impl TryFrom<StarkFelt> for DeprecatedSyscallSelector {
             b"Secp256k1GetXy" => Ok(Self::Secp256k1GetXy),
             b"Secp256k1Mul" => Ok(Self::Secp256k1Mul),
             b"Secp256k1New" => Ok(Self::Secp256k1New),
+            b"Secp256r1Add" => Ok(Self::Secp256r1Add),
+            b"Secp256r1GetPointFromX" => Ok(Self::Secp256r1GetPointFromX),
+            b"Secp256r1GetXy" => Ok(Self::Secp256r1GetXy),
+            b"Secp256r1Mul" => Ok(Self::Secp256r1Mul),
+            b"Secp256r1New" => Ok(Self::Secp256r1New),
             b"SendMessageToL1" => Ok(Self::SendMessageToL1),
             b"StorageRead" => Ok(Self::StorageRead),
             b"StorageWrite" => Ok(Self::StorageWrite),
